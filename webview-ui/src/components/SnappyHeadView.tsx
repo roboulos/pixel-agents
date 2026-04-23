@@ -1,36 +1,25 @@
 /* eslint-disable pixel-agents/no-inline-colors */
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { OfficeCanvas } from '../office/components/OfficeCanvas.js';
-import { EditorState } from '../office/editor/editorState.js';
-import type { OfficeState } from '../office/engine/officeState.js';
 import { snappyStateUrl } from '../runtime.js';
 
 type HeadMode = 'idle' | 'listening' | 'thinking' | 'working' | 'done' | 'blocked' | 'error';
 type LaneStatus = 'idle' | 'queued' | 'active' | 'waiting' | 'blocked' | 'paused' | 'done';
 
-type HeadLane = {
-  id: string;
-  title: string;
-  status: LaneStatus;
-  task: string;
-  detail?: string;
-  members?: string[];
-  count?: number;
-};
+type HeadLane = { id: string; title: string; status: LaneStatus; task: string };
+type HeadCard = { label: string; value: string; tone?: string };
 
 type HeadState = {
   mode: HeadMode;
   headline: string;
   detail: string;
   task: string;
-  scene?: 'office';
   now?: string;
   recent?: string;
   need?: string;
   lanes?: HeadLane[];
-  roster?: unknown[];
-  signals?: unknown[];
+  roster?: HeadCard[];
+  signals?: HeadCard[];
   recipes?: string[];
   source?: string;
 };
@@ -41,388 +30,637 @@ type LivePayload = {
   fresh: boolean;
   stale_reason: string | null;
   age_ms: number;
-  remaining_ms: number | null;
 };
 
-const AGENT_ID_BASE = 10000;
-const ACTIVE_STATUSES = new Set<LaneStatus>(['active']);
-const WAITING_STATUSES = new Set<LaneStatus>(['waiting', 'paused']);
-const BLOCKED_STATUSES = new Set<LaneStatus>(['blocked']);
-const LANE_PRIORITY = ['sweep', 'content', 'linkedin', 'meetings', 'pods', 'kernel'];
-const SEAT_SLOT_BY_LANE: Record<string, number> = {
-  sweep: 0,
-  content: 1,
-  linkedin: 2,
-  meetings: 4,
-  pods: 6,
-  kernel: 7,
+/* ── tokens ───────────────────────────────────────────────── */
+const MODE_BG: Record<HeadMode, string> = {
+  idle:      '#e8e9ed',
+  listening: '#dfecff',
+  thinking:  '#fff0ad',
+  working:   '#d7f5de',
+  done:      '#e3dcff',
+  blocked:   '#ffd9d6',
+  error:     '#ffd9b8',
+};
+const MODE_DOT: Record<HeadMode, string> = {
+  idle:      '#b8bcc4',
+  listening: '#3aa9ff',
+  thinking:  '#f8b61d',
+  working:   '#24b24a',
+  done:      '#7a5cff',
+  blocked:   '#e5443e',
+  error:     '#f1791f',
+};
+const LANE_DOT: Record<LaneStatus, string> = {
+  active:  '#24b24a',
+  queued:  '#3aa9ff',
+  waiting: '#f8b61d',
+  paused:  '#b8bcc4',
+  blocked: '#e5443e',
+  done:    '#7a5cff',
+  idle:    '#b8bcc4',
 };
 
-const MODE_COLORS: Record<HeadMode, string> = {
-  idle: 'var(--snappy-mode-idle)',
-  listening: 'var(--snappy-mode-listening)',
-  thinking: 'var(--snappy-mode-thinking)',
-  working: 'var(--snappy-mode-working)',
-  done: 'var(--snappy-mode-done)',
-  blocked: 'var(--snappy-mode-blocked)',
-  error: 'var(--snappy-mode-error)',
-};
+const PAPER   = '#fbf9f4';
+const PAPER2  = '#f2efe6';
+const INK     = '#0e0e13';
+const MUTED   = '#5c5a52';
+const HI_NOW  = '#fff7c2';
+const HI_NEXT = '#edf1ff';
 
-const LANE_STATUS_COLOR: Record<LaneStatus, string> = {
-  active: 'var(--snappy-mode-working)',
-  queued: 'var(--snappy-mode-thinking)',
-  waiting: 'var(--snappy-mode-thinking)',
-  paused: 'var(--snappy-mode-idle)',
-  blocked: 'var(--snappy-mode-blocked)',
-  done: 'var(--snappy-mode-done)',
-  idle: 'var(--snappy-mode-idle)',
-};
-
-function seatIdsByPosition(officeState: OfficeState): string[] {
-  return [...officeState.seats.entries()]
-    .sort((a, b) => {
-      if (a[1].seatRow !== b[1].seatRow) return a[1].seatRow - b[1].seatRow;
-      if (a[1].seatCol !== b[1].seatCol) return a[1].seatCol - b[1].seatCol;
-      return a[0].localeCompare(b[0]);
-    })
-    .map(([id]) => id);
-}
-
-function laneOrder(lane: HeadLane, index: number): number {
-  const p = LANE_PRIORITY.indexOf(lane.id);
-  return p >= 0 ? p : LANE_PRIORITY.length + index;
-}
-
-function laneAgentId(lane: HeadLane, index: number): number {
-  const p = LANE_PRIORITY.indexOf(lane.id);
-  return AGENT_ID_BASE + (p >= 0 ? p : 100 + index);
-}
-
-function cleanTask(text: string | undefined): string | null {
-  const value = (text || '').trim();
-  return value ? value : null;
-}
-
-function useSnappyScene(officeState: OfficeState, layoutReady: boolean) {
+/* ── data polling ─────────────────────────────────────────── */
+function useLiveState() {
   const [live, setLive] = useState<LivePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const managedIdsRef = useRef<number[]>([]);
+  const [clock, setClock] = useState('');
 
   useEffect(() => {
-    if (!layoutReady) return;
-    let cancelled = false;
-
-    const syncOffice = (payload: LivePayload) => {
-      const lanes = [...(payload.state.lanes || [])].sort(
-        (a, b) => laneOrder(a, 0) - laneOrder(b, 0),
-      );
-      const seatIds = seatIdsByPosition(officeState);
-      const desiredIds: number[] = [];
-      let followId: number | null = null;
-
-      lanes.forEach((lane, index) => {
-        const agentId = laneAgentId(lane, index);
-        desiredIds.push(agentId);
-        const preferredSeatId =
-          seatIds[SEAT_SLOT_BY_LANE[lane.id] ?? index] || seatIds[index] || undefined;
-        if (!officeState.characters.has(agentId)) {
-          officeState.addAgent(agentId, undefined, undefined, preferredSeatId, true, lane.title);
-          officeState.setTeamInfo(agentId, 'snappy-os', lane.title, false, undefined, false);
-        }
-
-        officeState.setAgentTool(
-          agentId,
-          ACTIVE_STATUSES.has(lane.status) ? cleanTask(lane.task) : null,
-        );
-        officeState.setAgentActive(agentId, ACTIVE_STATUSES.has(lane.status));
-
-        if (BLOCKED_STATUSES.has(lane.status)) {
-          officeState.showPermissionBubble(agentId);
-          if (followId === null) followId = agentId;
-        } else {
-          officeState.clearPermissionBubble(agentId);
-          if (WAITING_STATUSES.has(lane.status)) {
-            officeState.showWaitingBubble(agentId);
-          }
-          if (followId === null && ACTIVE_STATUSES.has(lane.status)) {
-            followId = agentId;
-          }
-        }
-      });
-
-      for (const id of managedIdsRef.current) {
-        if (!desiredIds.includes(id)) {
-          officeState.removeAgent(id);
-        }
-      }
-      managedIdsRef.current = desiredIds;
-      officeState.cameraFollowId = followId;
+    const tick = () => {
+      const now = new Date();
+      setClock(now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }));
     };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, []);
 
+  useEffect(() => {
+    let cancelled = false;
     const poll = async () => {
       try {
-        const response = await fetch(snappyStateUrl, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`HTTP ${response.status.toString()}`);
-        const payload = (await response.json()) as LivePayload;
-        if (cancelled) return;
-        setLive(payload);
-        setError(null);
-        syncOffice(payload);
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        const res = await fetch(snappyStateUrl, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = (await res.json()) as LivePayload;
+        if (!cancelled) { setLive(payload); setError(null); }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
     };
-
     void poll();
-    const timer = window.setInterval(() => void poll(), 4000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [layoutReady, officeState]);
+    const t = setInterval(() => void poll(), 4000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
 
-  return { live, error };
+  return { live, error, clock };
 }
 
-interface SnappyHeadViewProps {
-  officeState: OfficeState;
-  layoutReady: boolean;
+/* ── helpers ──────────────────────────────────────────────── */
+function today() {
+  return new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-// Condense lane title to a short readable label
-function shortLane(title: string): string {
-  return title
-    .replace(/-regen$/i, '')
-    .replace(/-/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+function laneAbbr(title: string): string {
+  return title.replace(/-regen$/i, '').slice(0, 3).toUpperCase();
 }
 
-export function SnappyHeadView({ officeState, layoutReady }: SnappyHeadViewProps) {
-  const { live, error } = useSnappyScene(officeState, layoutReady);
-  const [zoom, setZoom] = useState(2.4);
-  const panRef = useRef({ x: 0, y: 0 });
-  const editorState = useMemo(() => new EditorState(), []);
-
-  const lanes = useMemo(() => live?.state.lanes || [], [live]);
-  const state = live?.state;
-  const mode = state?.mode || 'idle';
-  const modeColor = MODE_COLORS[mode];
-
-  const nowText = state?.now || state?.task || null;
-  const sortedLanes = useMemo(
-    () => [...lanes].sort((a, b) => laneOrder(a, 0) - laneOrder(b, 0)),
-    [lanes],
+/* ── sub-components ───────────────────────────────────────── */
+function PxDot({ status, size = 10 }: { status: string; size?: number }) {
+  const color = (LANE_DOT as Record<string, string>)[status] ?? MODE_DOT['idle'];
+  const animate = status === 'active' || status === 'working' || status === 'blocked';
+  return (
+    <span style={{
+      display: 'inline-block',
+      width: size, height: size,
+      border: '1px solid #000',
+      background: color,
+      flexShrink: 0,
+      verticalAlign: 'middle',
+      animation: animate ? 'sfblink 1.2s steps(2) infinite' : 'none',
+    }} />
   );
+}
+
+function ModeBadge({ mode }: { mode: HeadMode }) {
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      border: '2px solid #000', padding: '3px 12px 2px',
+      fontSize: 14, textTransform: 'uppercase', letterSpacing: '1.5px',
+      boxShadow: '2px 2px 0 #000',
+      fontFamily: "'Silkscreen', monospace",
+      background: MODE_BG[mode],
+    }}>
+      <PxDot status={mode} size={10} />
+      {mode}
+    </div>
+  );
+}
+
+function RowPast({ time, title, dot, outputs }: {
+  time: string; title: string; dot: string; outputs: string[];
+}) {
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '70px 1fr',
+      padding: '3px 14px 3px 0',
+    }}>
+      <div style={{
+        textAlign: 'right', paddingRight: 14,
+        fontFamily: "'Silkscreen', monospace", fontSize: 11, color: MUTED,
+        position: 'relative',
+      }}>
+        {time}
+        <span style={{
+          position: 'absolute', right: -1, top: 5,
+          width: 7, height: 7, background: '#000', border: '1px solid #000',
+        }} />
+      </div>
+      <div style={{ paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 16, color: '#333' }}>
+          <PxDot status={dot} size={8} />
+          <span style={{ color: '#444' }}>{title}</span>
+          <span style={{ color: '#1a8c38', fontSize: 15 }}>✓</span>
+        </div>
+        {outputs.length > 0 && (
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+            {outputs.slice(0, 2).map((o, i) => (
+              <span key={i} style={{
+                display: 'inline-flex', alignItems: 'center',
+                border: '1px solid #000', padding: '0 5px',
+                fontSize: 12, background: '#fff',
+                fontFamily: "'VT323', monospace",
+              }}>▤ {o}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RowNow({ time, title, detail, progress }: {
+  time: string; title: string; detail?: string; progress?: number;
+}) {
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '70px 1fr',
+      background: HI_NOW,
+      borderTop: '2px solid #000', borderBottom: '2px solid #000',
+      padding: '9px 14px 9px 0',
+      margin: '4px 0',
+      position: 'relative',
+    }}>
+      <span style={{
+        position: 'absolute', left: 78, top: -9,
+        background: '#000', color: '#fff',
+        fontFamily: "'Silkscreen', monospace", fontSize: 10, letterSpacing: 2,
+        padding: '1px 6px',
+      }}>NOW</span>
+      <div style={{
+        textAlign: 'right', paddingRight: 14,
+        fontFamily: "'Silkscreen', monospace", fontSize: 11, color: MUTED,
+        position: 'relative',
+      }}>
+        {time}
+        <span style={{
+          position: 'absolute', right: -3, top: 5,
+          width: 11, height: 11, background: '#000', border: '1px solid #000',
+          animation: 'sfblink 1.2s steps(2) infinite',
+        }} />
+      </div>
+      <div style={{ paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <PxDot status="working" size={12} />
+          <span style={{
+            fontFamily: "'Jersey 10', monospace", fontSize: 28, lineHeight: 1.0, letterSpacing: '0.5px',
+          }}>{title}</span>
+        </div>
+        {detail && (
+          <div style={{
+            background: '#000', color: '#9bff9b', padding: '4px 8px',
+            fontFamily: "'VT323', monospace", fontSize: 14, letterSpacing: '0.5px',
+            lineHeight: 1.25, maxHeight: 40, overflow: 'hidden',
+            border: '1px solid #000',
+          }}>▸ {detail}<span style={{
+            display: 'inline-block', width: 6, height: 12, background: '#9bff9b',
+            verticalAlign: '-1px', animation: 'sfblink 0.6s steps(2) infinite', marginLeft: 2,
+          }} /></div>
+        )}
+        <div style={{ height: 9, background: '#fff', border: '1px solid #000', position: 'relative', overflow: 'hidden' }}>
+          <div style={{
+            position: 'absolute', left: 0, top: 0, bottom: 0,
+            width: `${progress ?? 45}%`,
+            background: 'repeating-linear-gradient(45deg, #24b24a 0 4px, #1a8c38 4px 8px)',
+            animation: 'sfbarfill 6s linear infinite',
+          }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RowNext({ time, title, dot }: { time: string; title: string; dot: string }) {
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '70px 1fr',
+      background: `linear-gradient(to right, transparent 71px, ${HI_NEXT} 71px)`,
+      padding: '3px 14px 3px 0',
+    }}>
+      <div style={{
+        textAlign: 'right', paddingRight: 14,
+        fontFamily: "'Silkscreen', monospace", fontSize: 11, color: MUTED,
+        position: 'relative',
+      }}>
+        {time}
+        <span style={{
+          position: 'absolute', right: -1, top: 5,
+          width: 7, height: 7, background: HI_NEXT, border: '1px solid #000',
+        }} />
+      </div>
+      <div style={{ paddingLeft: 10, display: 'flex', alignItems: 'center', gap: 6, fontSize: 17 }}>
+        <PxDot status={dot} size={8} />
+        <span>{title}</span>
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({ label }: { label: string }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6,
+      padding: '2px 14px',
+      fontFamily: "'Silkscreen', monospace", fontSize: 10, letterSpacing: '1.5px',
+      color: MUTED,
+      borderTop: '1px dashed #bbb',
+      background: PAPER2,
+    }}>{label}</div>
+  );
+}
+
+function ReadyCard({ title, sub, hot }: { title: string; sub: string; hot?: boolean }) {
+  return (
+    <div style={{
+      border: '1px solid #000', background: '#fff',
+      padding: '7px 9px', fontSize: 16, lineHeight: 1.18,
+    }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+        <span style={{ flex: 1, fontSize: 15, lineHeight: 1.1 }}>{title}</span>
+        {hot && <span style={{
+          fontFamily: "'Silkscreen', monospace", fontSize: 8,
+          background: '#e5443e', color: '#fff', padding: '0 4px',
+        }}>NEW</span>}
+      </div>
+      <div style={{ fontSize: 13, color: '#555', marginTop: 3 }}>{sub}</div>
+    </div>
+  );
+}
+
+function CmdRow({ k, label, go, hot }: { k: string; label: string; go: string; hot?: boolean }) {
+  return (
+    <div style={{
+      border: '1px solid #000', background: hot ? '#fff0ad' : '#fff',
+      padding: '3px 8px', fontFamily: "'VT323', monospace", fontSize: 16, lineHeight: 1.15,
+      display: 'flex', gap: 7, alignItems: 'center',
+    }}>
+      <span style={{
+        background: '#000', color: '#fff', fontFamily: "'Silkscreen', monospace", fontSize: 10,
+        padding: '2px 6px', letterSpacing: '0.5px', flexShrink: 0,
+      }}>{k}</span>
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ fontSize: 11, color: '#777', flexShrink: 0 }}>{go}</span>
+    </div>
+  );
+}
+
+function MeterRow({ label, pct, val }: { label: string; pct: number; val: string }) {
+  const tone = pct > 80 ? '#e5443e' : pct > 55 ? '#f8b61d' : '#24b24a';
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '44px 1fr 52px', gap: 7, alignItems: 'center', fontSize: 13 }}>
+      <span style={{ fontFamily: "'Silkscreen', monospace", fontSize: 9, letterSpacing: 1, color: '#555' }}>{label}</span>
+      <span style={{ height: 9, border: '1px solid #000', background: '#fff', position: 'relative', overflow: 'hidden' }}>
+        <span style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: tone }} />
+      </span>
+      <span style={{ fontFamily: "'VT323', monospace", fontSize: 14, textAlign: 'right' }}>{val}</span>
+    </div>
+  );
+}
+
+/* ── main view ────────────────────────────────────────────── */
+export function SnappyHeadView(_props: { officeState?: unknown; layoutReady?: boolean }) {
+  const { live, error, clock } = useLiveState();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  // Inject Google Fonts
+  useEffect(() => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=VT323&family=Silkscreen:wght@400;700&family=Jersey+10&display=swap';
+    document.head.appendChild(link);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes sfblink { 50% { opacity: 0.35; } }
+      @keyframes sfbarfill { 0% { width: 20%; } 100% { width: 95%; } }
+      @keyframes sfbars { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+    `;
+    document.head.appendChild(style);
+    return () => { link.remove(); style.remove(); };
+  }, []);
+
+  // Scale to fill viewport
+  useEffect(() => {
+    const update = () => {
+      const W = 800, H = 560;
+      const sx = window.innerWidth / W;
+      const sy = window.innerHeight / H;
+      setScale(Math.min(sx, sy));
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  const state = live?.state;
+  const mode: HeadMode = state?.mode ?? 'idle';
+  const lanes = useMemo(() => state?.lanes ?? [], [state]);
+  const signals = useMemo(() => state?.signals ?? [], [state]);
+  const roster = useMemo(() => (state?.roster ?? []) as HeadCard[], [state]);
+
+  // Derive timeline events from HeadState
+  const nowText = state?.now ?? state?.task ?? null;
+  const nowTime = clock ? clock.slice(0, 5) : '--:--';
+
+  const pastEvents = useMemo(() => {
+    if (!state?.recent) return [];
+    return state.recent.split(/[·\n]/).map(s => s.trim()).filter(Boolean).slice(0, 2).map((t, i) => ({
+      time: `~${i === 0 ? '-2m' : '-8m'}`,
+      title: t.length > 40 ? t.slice(0, 40) + '…' : t,
+      dot: 'done',
+      outputs: [] as string[],
+    }));
+  }, [state]);
+
+  const nextEvents = useMemo(() => {
+    const queued = lanes.filter(l => l.status === 'queued' || l.status === 'waiting');
+    return queued.slice(0, 2).map(l => ({
+      time: 'soon',
+      title: l.title.replace(/-regen$/i, '').replace(/-/g, ' '),
+      dot: l.status,
+    }));
+  }, [lanes]);
+
+  const activeLanes = lanes.filter(l => l.status === 'active');
+  const readyItems: { title: string; sub: string; hot?: boolean }[] = [
+    ...roster.slice(0, 2).map(r => ({ title: r.label, sub: r.value })),
+    ...(state?.need ? [{ title: 'Needs attention', sub: state.need, hot: true }] : []),
+  ];
+
+  const cmds = [
+    { k: '/sweep', label: 'triage inbox', go: 'haiku · ~90s' },
+    { k: '/log',   label: 'log last 2h to invoice', go: '5 blocks' },
+    { k: '/ask',   label: 'free prompt', go: 'natural language' },
+    { k: '/run',   label: 'run agent now', go: 'pick lane' },
+  ];
+
+  const meters = signals.slice(0, 3).map(s => {
+    const num = parseFloat(s.value);
+    const pct = isNaN(num) ? 30 : Math.min(num, 100);
+    return { label: s.label.toUpperCase().slice(0, 5), pct, val: s.value };
+  });
+
+  const ran  = pastEvents.length;
+  const now  = nowText ? 1 : 0;
+  const next = nextEvents.length;
+  const ready = readyItems.length;
 
   return (
     <div
-      className="w-full h-full relative overflow-hidden"
+      ref={containerRef}
       style={{
-        background: 'var(--snappy-bg)',
-        display: 'flex',
-        flexDirection: 'column',
+        width: '100vw', height: '100vh',
+        background: '#1f2128',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        overflow: 'hidden',
       }}
     >
-      {/* ══ TOP BAR — one line, always fits ══════════════════════════ */}
-      <div
-        style={{
+      <div style={{
+        transform: `scale(${scale})`,
+        transformOrigin: 'center center',
+        width: 800, height: 560,
+        fontFamily: "'VT323', ui-monospace, monospace",
+        background: PAPER,
+        color: INK,
+        overflow: 'hidden',
+        WebkitFontSmoothing: 'none' as const,
+        boxSizing: 'border-box' as const,
+        border: '1px solid #000',
+        display: 'flex',
+        flexDirection: 'column',
+        boxShadow: `0 0 0 1px #333, 0 0 70px -10px rgba(255, 220, 160, 0.25)`,
+      }}>
+
+        {/* ── Title bar ── */}
+        <div style={{
+          height: 24, borderBottom: '1px solid #000',
+          display: 'flex', alignItems: 'center', padding: '0 8px',
+          position: 'relative',
+          background: 'repeating-linear-gradient(to bottom, #000 0, #000 1px, #fbf9f4 1px, #fbf9f4 3px)',
           flexShrink: 0,
-          display: 'flex',
+        }}>
+          <span style={{ width: 12, height: 12, background: PAPER, border: '1px solid #000', display: 'inline-block' }} />
+          <span style={{
+            position: 'absolute', left: 0, right: 0, textAlign: 'center',
+            fontSize: 18, lineHeight: '24px', pointerEvents: 'none',
+          }}>
+            <span style={{ background: PAPER, padding: '0 10px' }}>Snappy · Operator</span>
+          </span>
+        </div>
+
+        {/* ── Top bar ── */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 14, alignItems: 'center',
+          padding: '7px 14px 8px',
+          borderBottom: '1px solid #000',
+          background: PAPER,
+          flexShrink: 0,
+        }}>
+          {/* Date */}
+          <div style={{ fontSize: 20, lineHeight: 1.05, whiteSpace: 'nowrap' }}>
+            {today()}
+          </div>
+
+          {/* Counts */}
+          <div style={{ display: 'flex', gap: 5, alignItems: 'stretch', flexWrap: 'wrap' }}>
+            {[
+              { n: ran,  l: 'ran',   bg: PAPER2 },
+              { n: now,  l: 'now',   bg: HI_NOW },
+              { n: next, l: 'next',  bg: HI_NEXT },
+              { n: ready,l: 'ready', bg: '#ffe7c2' },
+            ].map(s => (
+              <span key={s.l} style={{
+                display: 'inline-flex', alignItems: 'baseline', gap: 5,
+                padding: '0 7px', border: '1px solid #000', lineHeight: '22px',
+                background: s.bg,
+              }}>
+                <span style={{ fontSize: 22, fontFamily: "'Jersey 10', monospace", lineHeight: '22px' }}>{s.n}</span>
+                <span style={{ fontSize: 11, color: MUTED, textTransform: 'uppercase', letterSpacing: 1 }}>{s.l}</span>
+              </span>
+            ))}
+            <span style={{ alignSelf: 'center', color: MUTED, fontSize: 13, marginLeft: 6, whiteSpace: 'nowrap' }}>
+              {state?.headline ?? (error ? `⚠ ${error}` : 'awaiting state…')}
+            </span>
+          </div>
+
+          {/* Mode + clock */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <ModeBadge mode={mode} />
+            <span style={{ fontFamily: "'Silkscreen', monospace", fontSize: 11, color: MUTED, letterSpacing: 1 }}>{clock}</span>
+          </div>
+        </div>
+
+        {/* ── Body ── */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: '1fr 300px',
+          flex: 1, overflow: 'hidden',
+          minHeight: 0,
+        }}>
+
+          {/* Left: timeline */}
+          <div style={{
+            overflow: 'hidden',
+            padding: '6px 0',
+            position: 'relative',
+            background: `linear-gradient(to right, transparent 70px, #000 70px, #000 71px, transparent 71px), ${PAPER}`,
+          }}>
+            {pastEvents.length > 0 && (
+              <>
+                <SectionHeader label={`RAN · ${ran}`} />
+                {pastEvents.map((e, i) => <RowPast key={i} {...e} />)}
+              </>
+            )}
+
+            <SectionHeader label="NOW" />
+            {nowText
+              ? <RowNow time={nowTime} title={nowText} detail={state?.detail} />
+              : (
+                <div style={{ padding: '12px 14px 12px 84px', fontSize: 16, color: MUTED, fontFamily: "'Silkscreen', monospace" }}>
+                  {live ? 'idle' : `awaiting · ${snappyStateUrl}`}
+                </div>
+              )
+            }
+
+            {nextEvents.length > 0 && (
+              <>
+                <SectionHeader label={`NEXT · ${next}`} />
+                {nextEvents.map((e, i) => <RowNext key={i} {...e} />)}
+              </>
+            )}
+
+            {activeLanes.length > 0 && activeLanes.some(l => l.task) && (
+              <>
+                <SectionHeader label="ACTIVE" />
+                {activeLanes.filter(l => l.task).slice(0, 2).map((l, i) => (
+                  <RowNext key={i} time={laneAbbr(l.title)} title={l.task} dot="active" />
+                ))}
+              </>
+            )}
+          </div>
+
+          {/* Right: side panels */}
+          <div style={{
+            borderLeft: '1px solid #000',
+            background: PAPER,
+            padding: '8px 10px',
+            display: 'flex', flexDirection: 'column', gap: 7,
+            overflow: 'hidden',
+          }}>
+            {/* Mic/voice panel */}
+            <div style={{
+              border: '1px solid #000', background: '#000', color: '#9bff9b',
+              padding: '7px 10px', fontFamily: "'VT323', monospace",
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3,
+                fontFamily: "'Silkscreen', monospace", fontSize: 9, letterSpacing: '1.5px', color: '#fff',
+              }}>
+                <span style={{ width: 8, height: 8, background: '#9bff9b', display: 'inline-block', animation: 'sfblink 1.2s steps(2) infinite' }} />
+                <span>MIC</span>
+                <span style={{ marginLeft: 'auto', color: '#9bff9b', fontSize: 9, letterSpacing: 1 }}>
+                  WAKE: "snappy"
+                </span>
+              </div>
+              <div style={{ fontSize: 15, color: '#9bff9b', lineHeight: 1.15 }}>
+                ▸ {mode === 'listening' ? (state?.detail ?? 'listening…') : 'room quiet'}
+                <span style={{ display: 'inline-block', width: 5, height: 11, background: '#9bff9b', verticalAlign: '-1px', animation: 'sfblink 0.6s steps(2) infinite', marginLeft: 2 }} />
+              </div>
+            </div>
+
+            {/* Ready for you */}
+            {readyItems.length > 0 && (
+              <div style={{
+                border: '1px solid #000', background: '#ffe7c2',
+                padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 5,
+                boxShadow: '2px 2px 0 #000',
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  fontFamily: "'Silkscreen', monospace", fontSize: 9, letterSpacing: '1.5px', color: '#333',
+                  marginBottom: 2,
+                }}>
+                  <span>◆ READY FOR YOU</span>
+                  <span style={{ background: '#000', color: '#fff', padding: '0 4px', marginLeft: 'auto' }}>{readyItems.length}</span>
+                </div>
+                {readyItems.slice(0, 2).map((r, i) => (
+                  <ReadyCard key={i} title={r.title} sub={r.sub} hot={r.hot} />
+                ))}
+              </div>
+            )}
+
+            {/* Suggested commands */}
+            <div style={{
+              border: '1px solid #000', background: PAPER,
+              padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 4,
+              boxShadow: '2px 2px 0 #000', flex: 1,
+            }}>
+              <div style={{ fontFamily: "'Silkscreen', monospace", fontSize: 9, letterSpacing: '1.5px', color: '#333', marginBottom: 2 }}>
+                / COMMANDS
+              </div>
+              {cmds.map((c, i) => <CmdRow key={i} k={c.k} label={c.label} go={c.go} hot={i === 0} />)}
+            </div>
+
+            {/* Machine meters */}
+            {meters.length > 0 && (
+              <div style={{
+                border: '1px solid #000', background: PAPER,
+                padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 5,
+              }}>
+                <div style={{ fontFamily: "'Silkscreen', monospace", fontSize: 9, letterSpacing: '1.5px', color: '#333', marginBottom: 1 }}>
+                  ▤ MACHINE
+                </div>
+                {meters.map((m, i) => <MeterRow key={i} {...m} />)}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── Bottom bar: lane LEDs ── */}
+        <div style={{
+          borderTop: '1px solid #000',
+          display: 'grid', gridTemplateColumns: '1fr auto',
+          padding: '5px 14px',
+          background: `repeating-linear-gradient(to right, ${PAPER} 0 2px, ${PAPER2} 2px 4px)`,
+          fontSize: 14,
           alignItems: 'center',
           gap: 10,
-          padding: '8px 12px',
-          background: 'rgba(8,12,22,0.92)',
-          borderBottom: `1px solid color-mix(in srgb, ${modeColor} 30%, rgba(255,255,255,0.06))`,
-          minHeight: 40,
-        }}
-      >
-        {/* Mode LED + name */}
-        <div
-          style={{
-            flexShrink: 0,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-          }}
-        >
-          <span
-            style={{
-              width: 9,
-              height: 9,
-              borderRadius: 999,
-              background: modeColor,
-              boxShadow: `0 0 10px ${modeColor}, 0 0 4px ${modeColor}`,
-              flexShrink: 0,
-            }}
-          />
-          <span
-            style={{
-              fontSize: 11,
-              fontWeight: 800,
-              textTransform: 'uppercase',
-              letterSpacing: '0.12em',
-              color: modeColor,
-            }}
-          >
-            {mode}
-          </span>
-        </div>
-
-        {/* Separator */}
-        <span style={{ color: 'var(--snappy-frame)', fontSize: 12, flexShrink: 0 }}>·</span>
-
-        {/* Headline — fills remaining space, ellipsis */}
-        <div
-          style={{
-            flex: '1 1 0',
-            minWidth: 0,
-            fontSize: 14,
-            fontWeight: 800,
-            color: 'var(--snappy-text-bright)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {state?.headline || 'Connecting…'}
-        </div>
-
-        {/* Error badge — top-right */}
-        {error && (
-          <span
-            style={{
-              flexShrink: 0,
-              fontSize: 10,
-              fontWeight: 700,
-              color: 'var(--snappy-mode-error)',
-              border: '1px solid var(--snappy-mode-error)',
-              borderRadius: 4,
-              padding: '2px 6px',
-            }}
-          >
-            ERR
-          </span>
-        )}
-      </div>
-
-      {/* ══ OFFICE CANVAS — takes all remaining height ═══════════════ */}
-      <div style={{ flex: '1 1 0', position: 'relative', minHeight: 0 }}>
-        <OfficeCanvas
-          officeState={officeState}
-          onClick={() => {}}
-          isEditMode={false}
-          editorState={editorState}
-          onEditorTileAction={() => {}}
-          onEditorEraseAction={() => {}}
-          onEditorSelectionChange={() => {}}
-          onDeleteSelected={() => {}}
-          onRotateSelected={() => {}}
-          onDragMove={() => {}}
-          editorTick={0}
-          zoom={zoom}
-          onZoomChange={setZoom}
-          panRef={panRef}
-        />
-        {/* Bottom scrim — fades into the NOW panel */}
-        <div
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: '35%',
-            background:
-              'linear-gradient(0deg, rgba(8,12,22,0.95) 0%, rgba(8,12,22,0.5) 60%, rgba(8,12,22,0) 100%)',
-            pointerEvents: 'none',
-          }}
-        />
-      </div>
-
-      {/* ══ BOTTOM PANEL — NOW + lane LEDs ═══════════════════════════ */}
-      <div
-        style={{
           flexShrink: 0,
-          background: 'rgba(8,12,22,0.96)',
-          borderTop: '1px solid rgba(255,255,255,0.07)',
-          padding: '10px 12px 10px',
-        }}
-      >
-        {/* NOW label + task text */}
-        <div style={{ marginBottom: 8 }}>
-          <span
-            style={{
-              fontSize: 10,
-              fontWeight: 800,
-              letterSpacing: '0.2em',
-              textTransform: 'uppercase',
-              color: 'var(--snappy-text-muted)',
-              marginRight: 8,
-            }}
-          >
-            NOW
-          </span>
-          <span
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: 'var(--snappy-text-strong)',
-              lineHeight: 1.25,
-            }}
-          >
-            {nowText ?? (live ? 'Idle' : `awaiting ${snappyStateUrl}`)}
+        }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'nowrap', overflow: 'hidden', alignItems: 'center' }}>
+            {lanes.map((l) => (
+              <span key={l.id} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                fontFamily: "'Silkscreen', monospace", fontSize: 10, letterSpacing: 1,
+              }}>
+                <PxDot status={l.status} size={9} />
+                {laneAbbr(l.title)}
+              </span>
+            ))}
+          </div>
+          <span style={{ fontFamily: "'Silkscreen', monospace", fontSize: 10, color: MUTED, letterSpacing: 1 }}>
+            mac-mini · {clock} · {lanes.length} lanes
           </span>
         </div>
-
-        {/* Lane LEDs — single row, no wrapping */}
-        {sortedLanes.length > 0 && (
-          <div
-            style={{
-              display: 'flex',
-              gap: 8,
-              alignItems: 'center',
-              overflowX: 'auto',
-              scrollbarWidth: 'none',
-            }}
-          >
-            {sortedLanes.map((lane) => {
-              const color = LANE_STATUS_COLOR[lane.status];
-              const isActive = ACTIVE_STATUSES.has(lane.status);
-              return (
-                <div
-                  key={lane.id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    flexShrink: 0,
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: 999,
-                      background: color,
-                      boxShadow: isActive ? `0 0 8px ${color}, 0 0 3px ${color}` : 'none',
-                      flexShrink: 0,
-                    }}
-                  />
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 700,
-                      color: isActive ? 'var(--snappy-text-soft)' : 'var(--snappy-text-muted)',
-                      letterSpacing: '0.03em',
-                    }}
-                  >
-                    {shortLane(lane.title)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
     </div>
   );
