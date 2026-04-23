@@ -7,6 +7,7 @@ import { DebugView } from './components/DebugView.js';
 import { EditActionBar } from './components/EditActionBar.js';
 import { MigrationNotice } from './components/MigrationNotice.js';
 import { SettingsModal } from './components/SettingsModal.js';
+import { SnappyHeadView } from './components/SnappyHeadView.js';
 import { Tooltip } from './components/Tooltip.js';
 import { Modal } from './components/ui/Modal.js';
 import { VersionIndicator } from './components/VersionIndicator.js';
@@ -21,7 +22,7 @@ import { EditorToolbar } from './office/editor/EditorToolbar.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { isRotatable } from './office/layout/furnitureCatalog.js';
 import { EditTool } from './office/types.js';
-import { isBrowserRuntime } from './runtime.js';
+import { isBrowserRuntime, isSnappyHeadMode } from './runtime.js';
 import { vscode } from './vscodeApi.js';
 
 // Game state lives outside React — updated imperatively by message handlers
@@ -166,6 +167,10 @@ function App() {
 
   if (!layoutReady) {
     return <div className="w-full h-full flex items-center justify-center ">Loading...</div>;
+  }
+
+  if (isSnappyHeadMode) {
+    return <SnappyHeadView officeState={officeState} layoutReady={layoutReady} />;
   }
 
   return (

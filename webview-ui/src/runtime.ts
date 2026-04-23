@@ -12,5 +12,10 @@ type Runtime = 'vscode' | 'browser';
 // Future: 'cursor' | 'windsurf' | 'electron' | etc.
 
 const runtime: Runtime = typeof acquireVsCodeApi !== 'undefined' ? 'vscode' : 'browser';
+const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
 
 export const isBrowserRuntime = runtime === 'browser';
+export const isSnappyHeadMode =
+  isBrowserRuntime &&
+  (searchParams?.get('mode') === 'snappy' || searchParams?.get('snappy') === '1');
+export const snappyStateUrl = searchParams?.get('stateUrl') || '/state';
