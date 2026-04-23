@@ -9,12 +9,6 @@ import { snappyStateUrl } from '../runtime.js';
 type HeadMode = 'idle' | 'listening' | 'thinking' | 'working' | 'done' | 'blocked' | 'error';
 type LaneStatus = 'idle' | 'queued' | 'active' | 'waiting' | 'blocked' | 'paused' | 'done';
 
-type HeadCard = {
-  label: string;
-  value: string;
-  tone?: 'neutral' | 'good' | 'warn' | 'bad' | 'info';
-};
-
 type HeadLane = {
   id: string;
   title: string;
@@ -35,8 +29,8 @@ type HeadState = {
   recent?: string;
   need?: string;
   lanes?: HeadLane[];
-  roster?: HeadCard[];
-  signals?: HeadCard[];
+  roster?: unknown[];
+  signals?: unknown[];
   recipes?: string[];
   source?: string;
 };
@@ -107,21 +101,6 @@ function laneAgentId(lane: HeadLane, index: number): number {
 function cleanTask(text: string | undefined): string | null {
   const value = (text || '').trim();
   return value ? value : null;
-}
-
-function toneBorder(tone: HeadCard['tone']): string {
-  switch (tone) {
-    case 'good':
-      return 'var(--snappy-mode-working)';
-    case 'warn':
-      return 'var(--snappy-mode-thinking)';
-    case 'bad':
-      return 'var(--snappy-mode-blocked)';
-    case 'info':
-      return 'var(--snappy-mode-listening)';
-    default:
-      return 'var(--snappy-frame)';
-  }
 }
 
 function useSnappyScene(officeState: OfficeState, layoutReady: boolean) {
@@ -226,375 +205,225 @@ export function SnappyHeadView({ officeState, layoutReady }: SnappyHeadViewProps
   const editorState = useMemo(() => new EditorState(), []);
 
   const lanes = useMemo(() => live?.state.lanes || [], [live]);
-  const roster = useMemo(() => live?.state.roster || [], [live]);
-  const signals = useMemo(() => live?.state.signals || [], [live]);
-  const recipes = useMemo(() => live?.state.recipes || [], [live]);
   const state = live?.state;
   const mode = state?.mode || 'idle';
   const modeColor = MODE_COLORS[mode];
 
+  const nowText = state?.now || state?.task || null;
+  const sortedLanes = useMemo(
+    () => [...lanes].sort((a, b) => laneOrder(a, 0) - laneOrder(b, 0)),
+    [lanes],
+  );
+
   return (
     <div
       className="w-full h-full relative overflow-hidden"
-      style={{ background: 'var(--snappy-bg)' }}
+      style={{
+        background: 'var(--snappy-bg)',
+        display: 'flex',
+        flexDirection: 'column',
+      }}
     >
-      {/* ── Pixel office canvas ────────────────────────────────────── */}
-      <OfficeCanvas
-        officeState={officeState}
-        onClick={() => {}}
-        isEditMode={false}
-        editorState={editorState}
-        onEditorTileAction={() => {}}
-        onEditorEraseAction={() => {}}
-        onEditorSelectionChange={() => {}}
-        onDeleteSelected={() => {}}
-        onRotateSelected={() => {}}
-        onDragMove={() => {}}
-        editorTick={0}
-        zoom={zoom}
-        onZoomChange={setZoom}
-        panRef={panRef}
-      />
-
-      {/* ── Lighter scrims — let the office breathe ──────────────── */}
+      {/* ══ TOP BAR — one line, always fits ══════════════════════════ */}
       <div
-        className="absolute left-0 right-0 top-0 pointer-events-none"
         style={{
-          height: '30%',
-          background:
-            'linear-gradient(180deg, rgba(8,12,22,0.88) 0%, rgba(8,12,22,0.55) 50%, rgba(8,12,22,0) 100%)',
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '8px 12px',
+          background: 'rgba(8,12,22,0.92)',
+          borderBottom: `1px solid color-mix(in srgb, ${modeColor} 30%, rgba(255,255,255,0.06))`,
+          minHeight: 40,
         }}
-      />
-      <div
-        className="absolute left-0 right-0 bottom-0 pointer-events-none"
-        style={{
-          height: '28%',
-          background:
-            'linear-gradient(0deg, rgba(8,12,22,0.92) 0%, rgba(8,12,22,0.50) 55%, rgba(8,12,22,0) 100%)',
-        }}
-      />
-
-      {/* ══ TOP STRIP ═══════════════════════════════════════════════ */}
-      <div
-        className="absolute top-0 left-0 right-0 pointer-events-none"
-        style={{ padding: '14px 18px 0' }}
       >
+        {/* Mode LED + name */}
         <div
           style={{
+            flexShrink: 0,
             display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            gap: 16,
+            alignItems: 'center',
+            gap: 6,
           }}
         >
-          {/* Left: headline + mode + lanes */}
-          <div style={{ flex: '1 1 0', minWidth: 0 }}>
-            {/* Headline row */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
-              <div
-                style={{
-                  fontSize: 36,
-                  lineHeight: 1.0,
-                  fontWeight: 900,
-                  color: 'var(--snappy-text-bright)',
-                  letterSpacing: '-0.01em',
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {state?.headline || 'Connecting…'}
-              </div>
-              {/* Mode chip */}
-              <div
-                style={{
-                  flexShrink: 0,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 7,
-                  padding: '5px 12px',
-                  borderRadius: 999,
-                  border: `1px solid ${modeColor}`,
-                  background: `color-mix(in srgb, ${modeColor} 14%, rgba(10,16,28,0.7))`,
-                  fontSize: 13,
-                  fontWeight: 800,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                  color: 'var(--snappy-text-bright)',
-                }}
-              >
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: 999,
-                    background: modeColor,
-                    boxShadow: `0 0 8px ${modeColor}`,
-                    flexShrink: 0,
-                  }}
-                />
-                {mode}
-              </div>
-            </div>
-
-            {/* Detail line */}
-            {state?.detail && (
-              <div
-                style={{
-                  fontSize: 15,
-                  color: 'var(--snappy-text-soft)',
-                  marginBottom: 10,
-                  lineHeight: 1.3,
-                }}
-              >
-                {state.detail}
-              </div>
-            )}
-
-            {/* Lane status dots — compact, colored by status */}
-            {lanes.length > 0 && (
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {[...lanes]
-                  .sort((a, b) => laneOrder(a, 0) - laneOrder(b, 0))
-                  .map((lane) => (
-                    <div
-                      key={lane.id}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '4px 10px',
-                        borderRadius: 999,
-                        border: `1px solid color-mix(in srgb, ${LANE_STATUS_COLOR[lane.status]} 35%, rgba(255,255,255,0.08))`,
-                        background: `color-mix(in srgb, ${LANE_STATUS_COLOR[lane.status]} 10%, rgba(10,16,28,0.65))`,
-                        fontSize: 12,
-                        fontWeight: 700,
-                        color: 'var(--snappy-text-soft)',
-                        letterSpacing: '0.04em',
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: 999,
-                          background: LANE_STATUS_COLOR[lane.status],
-                          flexShrink: 0,
-                          boxShadow: ACTIVE_STATUSES.has(lane.status)
-                            ? `0 0 6px ${LANE_STATUS_COLOR[lane.status]}`
-                            : 'none',
-                        }}
-                      />
-                      {shortLane(lane.title)}
-                    </div>
-                  ))}
-              </div>
-            )}
-          </div>
-
-          {/* Right: signals */}
-          {signals.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-                flexShrink: 0,
-                width: 200,
-              }}
-            >
-              {signals.slice(0, 4).map((sig) => (
-                <div
-                  key={sig.label}
-                  style={{
-                    padding: '10px 14px',
-                    background: 'rgba(10,16,28,0.75)',
-                    border: `1px solid ${toneBorder(sig.tone)}`,
-                    borderRadius: 12,
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: 11,
-                      letterSpacing: '0.18em',
-                      textTransform: 'uppercase',
-                      color: 'var(--snappy-text-muted)',
-                      marginBottom: 3,
-                    }}
-                  >
-                    {sig.label}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 22,
-                      lineHeight: 1.1,
-                      fontWeight: 900,
-                      color: 'var(--snappy-text-bright)',
-                    }}
-                  >
-                    {sig.value}
-                  </div>
-                </div>
-              ))}
-              {error && (
-                <div
-                  style={{
-                    padding: '10px 14px',
-                    background: 'var(--snappy-danger-bg)',
-                    border: '1px solid var(--snappy-mode-blocked)',
-                    borderRadius: 12,
-                    color: 'var(--snappy-danger-text)',
-                    fontSize: 13,
-                    fontWeight: 700,
-                  }}
-                >
-                  {error}
-                </div>
-              )}
-            </div>
-          )}
+          <span
+            style={{
+              width: 9,
+              height: 9,
+              borderRadius: 999,
+              background: modeColor,
+              boxShadow: `0 0 10px ${modeColor}, 0 0 4px ${modeColor}`,
+              flexShrink: 0,
+            }}
+          />
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 800,
+              textTransform: 'uppercase',
+              letterSpacing: '0.12em',
+              color: modeColor,
+            }}
+          >
+            {mode}
+          </span>
         </div>
+
+        {/* Separator */}
+        <span style={{ color: 'var(--snappy-frame)', fontSize: 12, flexShrink: 0 }}>·</span>
+
+        {/* Headline — fills remaining space, ellipsis */}
+        <div
+          style={{
+            flex: '1 1 0',
+            minWidth: 0,
+            fontSize: 14,
+            fontWeight: 800,
+            color: 'var(--snappy-text-bright)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {state?.headline || 'Connecting…'}
+        </div>
+
+        {/* Error badge — top-right */}
+        {error && (
+          <span
+            style={{
+              flexShrink: 0,
+              fontSize: 10,
+              fontWeight: 700,
+              color: 'var(--snappy-mode-error)',
+              border: '1px solid var(--snappy-mode-error)',
+              borderRadius: 4,
+              padding: '2px 6px',
+            }}
+          >
+            ERR
+          </span>
+        )}
       </div>
 
-      {/* ══ BOTTOM STRIP ════════════════════════════════════════════ */}
+      {/* ══ OFFICE CANVAS — takes all remaining height ═══════════════ */}
+      <div style={{ flex: '1 1 0', position: 'relative', minHeight: 0 }}>
+        <OfficeCanvas
+          officeState={officeState}
+          onClick={() => {}}
+          isEditMode={false}
+          editorState={editorState}
+          onEditorTileAction={() => {}}
+          onEditorEraseAction={() => {}}
+          onEditorSelectionChange={() => {}}
+          onDeleteSelected={() => {}}
+          onRotateSelected={() => {}}
+          onDragMove={() => {}}
+          editorTick={0}
+          zoom={zoom}
+          onZoomChange={setZoom}
+          panRef={panRef}
+        />
+        {/* Bottom scrim — fades into the NOW panel */}
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: '35%',
+            background:
+              'linear-gradient(0deg, rgba(8,12,22,0.95) 0%, rgba(8,12,22,0.5) 60%, rgba(8,12,22,0) 100%)',
+            pointerEvents: 'none',
+          }}
+        />
+      </div>
+
+      {/* ══ BOTTOM PANEL — NOW + lane LEDs ═══════════════════════════ */}
       <div
-        className="absolute left-0 right-0 bottom-0 pointer-events-none"
-        style={{ padding: '0 18px 14px' }}
+        style={{
+          flexShrink: 0,
+          background: 'rgba(8,12,22,0.96)',
+          borderTop: '1px solid rgba(255,255,255,0.07)',
+          padding: '10px 12px 10px',
+        }}
       >
-        {/* Recipes + Roster row — sits just above the 3-grid */}
-        {(recipes.length > 0 || roster.length > 0) && (
+        {/* NOW label + task text */}
+        <div style={{ marginBottom: 8 }}>
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 800,
+              letterSpacing: '0.2em',
+              textTransform: 'uppercase',
+              color: 'var(--snappy-text-muted)',
+              marginRight: 8,
+            }}
+          >
+            NOW
+          </span>
+          <span
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: 'var(--snappy-text-strong)',
+              lineHeight: 1.25,
+            }}
+          >
+            {nowText ?? (live ? 'Idle' : `awaiting ${snappyStateUrl}`)}
+          </span>
+        </div>
+
+        {/* Lane LEDs — single row, no wrapping */}
+        {sortedLanes.length > 0 && (
           <div
             style={{
               display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'flex-end',
-              gap: 12,
-              marginBottom: 10,
+              gap: 8,
+              alignItems: 'center',
+              overflowX: 'auto',
+              scrollbarWidth: 'none',
             }}
           >
-            {/* Recipes — active plan/tasks */}
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: '1 1 0' }}>
-              {recipes.slice(0, 6).map((recipe) => (
-                <span
-                  key={recipe}
-                  style={{
-                    padding: '4px 10px',
-                    borderRadius: 999,
-                    background: 'rgba(14,22,38,0.72)',
-                    border: '1px solid var(--snappy-panel-border)',
-                    color: 'var(--snappy-text-bright)',
-                    fontSize: 12,
-                    fontWeight: 800,
-                    letterSpacing: '0.06em',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  {recipe}
-                </span>
-              ))}
-            </div>
-
-            {/* Roster cards */}
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexShrink: 0 }}>
-              {roster.slice(0, 3).map((item) => (
+            {sortedLanes.map((lane) => {
+              const color = LANE_STATUS_COLOR[lane.status];
+              const isActive = ACTIVE_STATUSES.has(lane.status);
+              return (
                 <div
-                  key={item.label}
+                  key={lane.id}
                   style={{
-                    padding: '8px 12px',
-                    background: 'rgba(10,16,28,0.78)',
-                    borderLeft: `3px solid ${toneBorder(item.tone)}`,
-                    borderRadius: 10,
-                    borderTop: '1px solid var(--snappy-panel-border-soft)',
-                    borderRight: '1px solid var(--snappy-panel-border-soft)',
-                    borderBottom: '1px solid var(--snappy-panel-border-soft)',
-                    minWidth: 100,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    flexShrink: 0,
                   }}
                 >
-                  <div
+                  <span
                     style={{
-                      fontSize: 13,
-                      fontWeight: 800,
-                      color: 'var(--snappy-text-bright)',
-                      lineHeight: 1.15,
+                      width: 7,
+                      height: 7,
+                      borderRadius: 999,
+                      background: color,
+                      boxShadow: isActive ? `0 0 8px ${color}, 0 0 3px ${color}` : 'none',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: isActive ? 'var(--snappy-text-soft)' : 'var(--snappy-text-muted)',
+                      letterSpacing: '0.03em',
                     }}
                   >
-                    {item.label}
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--snappy-text-subtle)', marginTop: 3 }}>
-                    {item.value}
-                  </div>
+                    {shortLane(lane.title)}
+                  </span>
                 </div>
-              ))}
-            </div>
+              );
+            })}
           </div>
         )}
-
-        {/* NOW · RECENT · NEED — the main 3-grid */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1.3fr 0.85fr', gap: 10 }}>
-          {[
-            { label: 'NOW', value: state?.now || state?.task || 'Waiting for state' },
-            { label: 'RECENT', value: state?.recent || 'No recent output' },
-            { label: 'NEED', value: live ? state?.need || 'None' : `awaiting · ${snappyStateUrl}` },
-          ].map((item) => (
-            <div
-              key={item.label}
-              style={{
-                padding: '12px 14px',
-                background: 'rgba(10,16,28,0.82)',
-                border: '1px solid var(--snappy-panel-border)',
-                borderRadius: 14,
-                minHeight: 66,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  letterSpacing: '0.2em',
-                  textTransform: 'uppercase',
-                  color: 'var(--snappy-text-muted)',
-                  marginBottom: 5,
-                }}
-              >
-                {item.label}
-              </div>
-              <div
-                style={{
-                  fontSize: 18,
-                  lineHeight: 1.2,
-                  fontWeight: 900,
-                  color: 'var(--snappy-text-strong)',
-                  overflow: 'hidden',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical',
-                }}
-              >
-                {item.value}
-              </div>
-            </div>
-          ))}
-        </div>
       </div>
-
-      {/* ── Error (no signals column to absorb it) */}
-      {error && signals.length === 0 && (
-        <div
-          className="absolute top-8 right-8 pointer-events-none"
-          style={{
-            width: 200,
-            padding: '12px 14px',
-            background: 'var(--snappy-danger-bg)',
-            border: '1px solid var(--snappy-mode-blocked)',
-            borderRadius: 12,
-            color: 'var(--snappy-danger-text)',
-            fontSize: 13,
-            fontWeight: 700,
-          }}
-        >
-          {error}
-        </div>
-      )}
     </div>
   );
 }
