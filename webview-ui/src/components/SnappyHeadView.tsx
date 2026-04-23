@@ -1,5 +1,5 @@
+/* eslint-disable pixel-agents/no-inline-colors */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
 
 import { OfficeCanvas } from '../office/components/OfficeCanvas.js';
 import { EditorState } from '../office/editor/editorState.js';
@@ -65,13 +65,23 @@ const SEAT_SLOT_BY_LANE: Record<string, number> = {
 };
 
 const MODE_COLORS: Record<HeadMode, string> = {
-  idle: '#7f8ca8',
-  listening: '#44d4ff',
-  thinking: '#ffbf47',
-  working: '#62db90',
-  done: '#28d9bf',
-  blocked: '#ff6673',
-  error: '#ff914d',
+  idle: 'var(--snappy-mode-idle)',
+  listening: 'var(--snappy-mode-listening)',
+  thinking: 'var(--snappy-mode-thinking)',
+  working: 'var(--snappy-mode-working)',
+  done: 'var(--snappy-mode-done)',
+  blocked: 'var(--snappy-mode-blocked)',
+  error: 'var(--snappy-mode-error)',
+};
+
+const LANE_STATUS_COLOR: Record<LaneStatus, string> = {
+  active: 'var(--snappy-mode-working)',
+  queued: 'var(--snappy-mode-thinking)',
+  waiting: 'var(--snappy-mode-thinking)',
+  paused: 'var(--snappy-mode-idle)',
+  blocked: 'var(--snappy-mode-blocked)',
+  done: 'var(--snappy-mode-done)',
+  idle: 'var(--snappy-mode-idle)',
 };
 
 function seatIdsByPosition(officeState: OfficeState): string[] {
@@ -99,27 +109,18 @@ function cleanTask(text: string | undefined): string | null {
   return value ? value : null;
 }
 
-function modeChip(mode: HeadMode): CSSProperties {
-  return {
-    borderColor: MODE_COLORS[mode],
-    color: '#eef5ff',
-    background: `${MODE_COLORS[mode]}26`,
-    boxShadow: `0 0 0 1px ${MODE_COLORS[mode]}55 inset`,
-  };
-}
-
 function toneBorder(tone: HeadCard['tone']): string {
   switch (tone) {
     case 'good':
-      return '#62db90';
+      return 'var(--snappy-mode-working)';
     case 'warn':
-      return '#ffbf47';
+      return 'var(--snappy-mode-thinking)';
     case 'bad':
-      return '#ff6673';
+      return 'var(--snappy-mode-blocked)';
     case 'info':
-      return '#44d4ff';
+      return 'var(--snappy-mode-listening)';
     default:
-      return '#5f6b86';
+      return 'var(--snappy-frame)';
   }
 }
 
@@ -133,7 +134,9 @@ function useSnappyScene(officeState: OfficeState, layoutReady: boolean) {
     let cancelled = false;
 
     const syncOffice = (payload: LivePayload) => {
-      const lanes = [...(payload.state.lanes || [])].sort((a, b) => laneOrder(a, 0) - laneOrder(b, 0));
+      const lanes = [...(payload.state.lanes || [])].sort(
+        (a, b) => laneOrder(a, 0) - laneOrder(b, 0),
+      );
       const seatIds = seatIdsByPosition(officeState);
       const desiredIds: number[] = [];
       let followId: number | null = null;
@@ -141,13 +144,17 @@ function useSnappyScene(officeState: OfficeState, layoutReady: boolean) {
       lanes.forEach((lane, index) => {
         const agentId = laneAgentId(lane, index);
         desiredIds.push(agentId);
-        const preferredSeatId = seatIds[SEAT_SLOT_BY_LANE[lane.id] ?? index] || seatIds[index] || undefined;
+        const preferredSeatId =
+          seatIds[SEAT_SLOT_BY_LANE[lane.id] ?? index] || seatIds[index] || undefined;
         if (!officeState.characters.has(agentId)) {
           officeState.addAgent(agentId, undefined, undefined, preferredSeatId, true, lane.title);
           officeState.setTeamInfo(agentId, 'snappy-os', lane.title, false, undefined, false);
         }
 
-        officeState.setAgentTool(agentId, ACTIVE_STATUSES.has(lane.status) ? cleanTask(lane.task) : null);
+        officeState.setAgentTool(
+          agentId,
+          ACTIVE_STATUSES.has(lane.status) ? cleanTask(lane.task) : null,
+        );
         officeState.setAgentActive(agentId, ACTIVE_STATUSES.has(lane.status));
 
         if (BLOCKED_STATUSES.has(lane.status)) {
@@ -176,9 +183,7 @@ function useSnappyScene(officeState: OfficeState, layoutReady: boolean) {
     const poll = async () => {
       try {
         const response = await fetch(snappyStateUrl, { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status.toString()}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status.toString()}`);
         const payload = (await response.json()) as LivePayload;
         if (cancelled) return;
         setLive(payload);
@@ -206,6 +211,14 @@ interface SnappyHeadViewProps {
   layoutReady: boolean;
 }
 
+// Condense lane title to a short readable label
+function shortLane(title: string): string {
+  return title
+    .replace(/-regen$/i, '')
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function SnappyHeadView({ officeState, layoutReady }: SnappyHeadViewProps) {
   const { live, error } = useSnappyScene(officeState, layoutReady);
   const [zoom, setZoom] = useState(2.4);
@@ -217,9 +230,15 @@ export function SnappyHeadView({ officeState, layoutReady }: SnappyHeadViewProps
   const signals = useMemo(() => live?.state.signals || [], [live]);
   const recipes = useMemo(() => live?.state.recipes || [], [live]);
   const state = live?.state;
+  const mode = state?.mode || 'idle';
+  const modeColor = MODE_COLORS[mode];
 
   return (
-    <div className="w-full h-full relative overflow-hidden" style={{ background: '#101827' }}>
+    <div
+      className="w-full h-full relative overflow-hidden"
+      style={{ background: 'var(--snappy-bg)' }}
+    >
+      {/* ── Pixel office canvas ────────────────────────────────────── */}
       <OfficeCanvas
         officeState={officeState}
         onClick={() => {}}
@@ -237,197 +256,345 @@ export function SnappyHeadView({ officeState, layoutReady }: SnappyHeadViewProps
         panRef={panRef}
       />
 
+      {/* ── Lighter scrims — let the office breathe ──────────────── */}
       <div
         className="absolute left-0 right-0 top-0 pointer-events-none"
         style={{
-          height: '24%',
-          background: 'linear-gradient(180deg, rgba(8,12,22,0.78) 0%, rgba(8,12,22,0.24) 62%, rgba(8,12,22,0) 100%)',
+          height: '30%',
+          background:
+            'linear-gradient(180deg, rgba(8,12,22,0.88) 0%, rgba(8,12,22,0.55) 50%, rgba(8,12,22,0) 100%)',
         }}
       />
       <div
         className="absolute left-0 right-0 bottom-0 pointer-events-none"
         style={{
-          height: '22%',
-          background: 'linear-gradient(0deg, rgba(8,12,22,0.82) 0%, rgba(8,12,22,0.28) 58%, rgba(8,12,22,0) 100%)',
+          height: '28%',
+          background:
+            'linear-gradient(0deg, rgba(8,12,22,0.92) 0%, rgba(8,12,22,0.50) 55%, rgba(8,12,22,0) 100%)',
         }}
       />
 
-      <div className="absolute top-8 left-8 right-8 flex items-start justify-between gap-16">
+      {/* ══ TOP STRIP ═══════════════════════════════════════════════ */}
+      <div
+        className="absolute top-0 left-0 right-0 pointer-events-none"
+        style={{ padding: '14px 18px 0' }}
+      >
         <div
-          className="pointer-events-none"
           style={{
-            maxWidth: '58%',
-            padding: '12px 16px',
-            background: 'rgba(14, 22, 38, 0.74)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            borderRadius: 16,
-            boxShadow: '0 14px 42px rgba(0,0,0,0.24)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: 16,
           }}
         >
-          <div style={{ fontSize: 11, letterSpacing: '0.24em', textTransform: 'uppercase', color: '#96a4c2', marginBottom: 6 }}>
-            Snappy Office
-          </div>
-          <div className="flex items-center gap-10 flex-wrap" style={{ marginBottom: 8 }}>
-            <div style={{ fontSize: 28, lineHeight: 1.05, fontWeight: 900, color: '#eef5ff' }}>
-              {state?.headline || 'Connecting to snappy state'}
-            </div>
-            <div
-              style={{
-                ...modeChip(state?.mode || 'idle'),
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '8px 12px',
-                borderRadius: 999,
-                border: '1px solid',
-                fontSize: 12,
-                fontWeight: 800,
-                textTransform: 'uppercase',
-                letterSpacing: '0.1em',
-              }}
-            >
-              <span
+          {/* Left: headline + mode + lanes */}
+          <div style={{ flex: '1 1 0', minWidth: 0 }}>
+            {/* Headline row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+              <div
                 style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: 999,
-                  background: MODE_COLORS[state?.mode || 'idle'],
-                  boxShadow: `0 0 10px ${MODE_COLORS[state?.mode || 'idle']}`,
-                }}
-              />
-              {state?.mode || 'idle'}
-            </div>
-          </div>
-          <div style={{ fontSize: 15, lineHeight: 1.3, color: '#d4dceb' }}>
-            {state?.detail || 'Pixel Agents renderer awaiting head-screen state'}
-          </div>
-          <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {lanes.map((lane) => (
-              <span
-                key={lane.id}
-                style={{
-                  padding: '6px 10px',
-                  borderRadius: 999,
-                  background: 'rgba(255,255,255,0.06)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  color: '#edf3ff',
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.06em',
+                  fontSize: 36,
+                  lineHeight: 1.0,
+                  fontWeight: 900,
+                  color: 'var(--snappy-text-bright)',
+                  letterSpacing: '-0.01em',
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
                 }}
               >
-                {lane.title} · {lane.status}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-10" style={{ width: 320 }}>
-          {signals.map((signal) => (
-            <div
-              key={signal.label}
-              style={{
-                padding: '12px 14px',
-                background: 'rgba(14, 22, 38, 0.74)',
-                border: `1px solid ${toneBorder(signal.tone)}`,
-                borderRadius: 14,
-                boxShadow: '0 14px 42px rgba(0,0,0,0.20)',
-              }}
-            >
-              <div style={{ fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', color: '#96a4c2', marginBottom: 4 }}>
-                {signal.label}
+                {state?.headline || 'Connecting…'}
               </div>
-              <div style={{ fontSize: 18, lineHeight: 1.15, fontWeight: 800, color: '#f2f6ff' }}>
-                {signal.value}
+              {/* Mode chip */}
+              <div
+                style={{
+                  flexShrink: 0,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
+                  padding: '5px 12px',
+                  borderRadius: 999,
+                  border: `1px solid ${modeColor}`,
+                  background: `color-mix(in srgb, ${modeColor} 14%, rgba(10,16,28,0.7))`,
+                  fontSize: 13,
+                  fontWeight: 800,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  color: 'var(--snappy-text-bright)',
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 999,
+                    background: modeColor,
+                    boxShadow: `0 0 8px ${modeColor}`,
+                    flexShrink: 0,
+                  }}
+                />
+                {mode}
               </div>
             </div>
-          ))}
-          {error && (
-            <div style={{ padding: '12px 14px', background: 'rgba(50, 14, 20, 0.78)', border: '1px solid #ff6673', borderRadius: 14, color: '#fff1f3', fontSize: 14, fontWeight: 700 }}>
-              {error}
+
+            {/* Detail line */}
+            {state?.detail && (
+              <div
+                style={{
+                  fontSize: 15,
+                  color: 'var(--snappy-text-soft)',
+                  marginBottom: 10,
+                  lineHeight: 1.3,
+                }}
+              >
+                {state.detail}
+              </div>
+            )}
+
+            {/* Lane status dots — compact, colored by status */}
+            {lanes.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {[...lanes]
+                  .sort((a, b) => laneOrder(a, 0) - laneOrder(b, 0))
+                  .map((lane) => (
+                    <div
+                      key={lane.id}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '4px 10px',
+                        borderRadius: 999,
+                        border: `1px solid color-mix(in srgb, ${LANE_STATUS_COLOR[lane.status]} 35%, rgba(255,255,255,0.08))`,
+                        background: `color-mix(in srgb, ${LANE_STATUS_COLOR[lane.status]} 10%, rgba(10,16,28,0.65))`,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: 'var(--snappy-text-soft)',
+                        letterSpacing: '0.04em',
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: 999,
+                          background: LANE_STATUS_COLOR[lane.status],
+                          flexShrink: 0,
+                          boxShadow: ACTIVE_STATUSES.has(lane.status)
+                            ? `0 0 6px ${LANE_STATUS_COLOR[lane.status]}`
+                            : 'none',
+                        }}
+                      />
+                      {shortLane(lane.title)}
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+
+          {/* Right: signals */}
+          {signals.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                flexShrink: 0,
+                width: 200,
+              }}
+            >
+              {signals.slice(0, 4).map((sig) => (
+                <div
+                  key={sig.label}
+                  style={{
+                    padding: '10px 14px',
+                    background: 'rgba(10,16,28,0.75)',
+                    border: `1px solid ${toneBorder(sig.tone)}`,
+                    borderRadius: 12,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 11,
+                      letterSpacing: '0.18em',
+                      textTransform: 'uppercase',
+                      color: 'var(--snappy-text-muted)',
+                      marginBottom: 3,
+                    }}
+                  >
+                    {sig.label}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 22,
+                      lineHeight: 1.1,
+                      fontWeight: 900,
+                      color: 'var(--snappy-text-bright)',
+                    }}
+                  >
+                    {sig.value}
+                  </div>
+                </div>
+              ))}
+              {error && (
+                <div
+                  style={{
+                    padding: '10px 14px',
+                    background: 'var(--snappy-danger-bg)',
+                    border: '1px solid var(--snappy-mode-blocked)',
+                    borderRadius: 12,
+                    color: 'var(--snappy-danger-text)',
+                    fontSize: 13,
+                    fontWeight: 700,
+                  }}
+                >
+                  {error}
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
 
-      <div className="absolute left-8 right-8 flex items-end justify-between gap-16" style={{ bottom: 106 }}>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', maxWidth: '58%' }}>
-          {recipes.map((recipe) => (
-            <span
-              key={recipe}
-              style={{
-                padding: '7px 10px',
-                borderRadius: 999,
-                background: 'rgba(14, 22, 38, 0.74)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                color: '#f2f6ff',
-                fontSize: 12,
-                fontWeight: 800,
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-              }}
-            >
-              {recipe}
-            </span>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 10, maxWidth: '36%', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {roster.slice(0, 4).map((item) => (
+      {/* ══ BOTTOM STRIP ════════════════════════════════════════════ */}
+      <div
+        className="absolute left-0 right-0 bottom-0 pointer-events-none"
+        style={{ padding: '0 18px 14px' }}
+      >
+        {/* Recipes + Roster row — sits just above the 3-grid */}
+        {(recipes.length > 0 || roster.length > 0) && (
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-end',
+              gap: 12,
+              marginBottom: 10,
+            }}
+          >
+            {/* Recipes — active plan/tasks */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: '1 1 0' }}>
+              {recipes.slice(0, 6).map((recipe) => (
+                <span
+                  key={recipe}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 999,
+                    background: 'rgba(14,22,38,0.72)',
+                    border: '1px solid var(--snappy-panel-border)',
+                    color: 'var(--snappy-text-bright)',
+                    fontSize: 12,
+                    fontWeight: 800,
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {recipe}
+                </span>
+              ))}
+            </div>
+
+            {/* Roster cards */}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexShrink: 0 }}>
+              {roster.slice(0, 3).map((item) => (
+                <div
+                  key={item.label}
+                  style={{
+                    padding: '8px 12px',
+                    background: 'rgba(10,16,28,0.78)',
+                    borderLeft: `3px solid ${toneBorder(item.tone)}`,
+                    borderRadius: 10,
+                    borderTop: '1px solid var(--snappy-panel-border-soft)',
+                    borderRight: '1px solid var(--snappy-panel-border-soft)',
+                    borderBottom: '1px solid var(--snappy-panel-border-soft)',
+                    minWidth: 100,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 800,
+                      color: 'var(--snappy-text-bright)',
+                      lineHeight: 1.15,
+                    }}
+                  >
+                    {item.label}
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--snappy-text-subtle)', marginTop: 3 }}>
+                    {item.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* NOW · RECENT · NEED — the main 3-grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1.3fr 0.85fr', gap: 10 }}>
+          {[
+            { label: 'NOW', value: state?.now || state?.task || 'Waiting for state' },
+            { label: 'RECENT', value: state?.recent || 'No recent output' },
+            { label: 'NEED', value: live ? state?.need || 'None' : `awaiting · ${snappyStateUrl}` },
+          ].map((item) => (
             <div
               key={item.label}
               style={{
-                minWidth: 120,
-                padding: '10px 12px',
-                background: 'rgba(14, 22, 38, 0.74)',
-                borderLeft: `4px solid ${toneBorder(item.tone)}`,
-                borderRadius: 12,
-                borderTop: '1px solid rgba(255,255,255,0.06)',
-                borderRight: '1px solid rgba(255,255,255,0.06)',
-                borderBottom: '1px solid rgba(255,255,255,0.06)',
+                padding: '12px 14px',
+                background: 'rgba(10,16,28,0.82)',
+                border: '1px solid var(--snappy-panel-border)',
+                borderRadius: 14,
+                minHeight: 66,
               }}
             >
-              <div style={{ fontSize: 13, fontWeight: 800, lineHeight: 1.15, color: '#f2f6ff' }}>{item.label}</div>
-              <div style={{ fontSize: 12, lineHeight: 1.25, color: '#aab6d1', marginTop: 4 }}>{item.value}</div>
+              <div
+                style={{
+                  fontSize: 11,
+                  letterSpacing: '0.2em',
+                  textTransform: 'uppercase',
+                  color: 'var(--snappy-text-muted)',
+                  marginBottom: 5,
+                }}
+              >
+                {item.label}
+              </div>
+              <div
+                style={{
+                  fontSize: 18,
+                  lineHeight: 1.2,
+                  fontWeight: 900,
+                  color: 'var(--snappy-text-strong)',
+                  overflow: 'hidden',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                }}
+              >
+                {item.value}
+              </div>
             </div>
           ))}
         </div>
       </div>
 
-      <div
-        className="absolute left-8 right-8 bottom-8"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1.05fr 1.35fr 0.9fr',
-          gap: 12,
-        }}
-      >
-        {[
-          { label: 'Now', value: state?.now || state?.task || 'Waiting for state' },
-          { label: 'Recent', value: state?.recent || 'No recent output surfaced' },
-          {
-            label: 'Need',
-            value: live ? (state?.need || 'None') : `source · ${snappyStateUrl} · awaiting first poll`,
-          },
-        ].map((item) => (
-          <div
-            key={item.label}
-            style={{
-              padding: '14px 16px',
-              background: 'rgba(14, 22, 38, 0.82)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: 16,
-              boxShadow: '0 14px 42px rgba(0,0,0,0.24)',
-              minHeight: 74,
-            }}
-          >
-            <div style={{ fontSize: 11, letterSpacing: '0.22em', textTransform: 'uppercase', color: '#96a4c2', marginBottom: 6 }}>
-              {item.label}
-            </div>
-            <div style={{ fontSize: 20, lineHeight: 1.15, fontWeight: 900, color: '#eff5ff' }}>{item.value}</div>
-          </div>
-        ))}
-      </div>
+      {/* ── Error (no signals column to absorb it) */}
+      {error && signals.length === 0 && (
+        <div
+          className="absolute top-8 right-8 pointer-events-none"
+          style={{
+            width: 200,
+            padding: '12px 14px',
+            background: 'var(--snappy-danger-bg)',
+            border: '1px solid var(--snappy-mode-blocked)',
+            borderRadius: 12,
+            color: 'var(--snappy-danger-text)',
+            fontSize: 13,
+            fontWeight: 700,
+          }}
+        >
+          {error}
+        </div>
+      )}
     </div>
   );
 }
